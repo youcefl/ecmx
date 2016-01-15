@@ -37,7 +37,7 @@ import os
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-VERSION = '0.3.1'
+VERSION = '0.3.2'
 NAME = 'ecmx'
 
 # ----------------------------------------------------------------------------
@@ -50,15 +50,20 @@ logger.setLevel(logging.DEBUG)
 cmd_line_parser = argparse.ArgumentParser()
 cmd_line_parser.add_argument( '-v', '--verbosity', action = 'count',
                               default = 0,
-                              help = 'Increase verbosity level (use -vv to have ' \
-                                    + 'gmp-ecm run in verbose mode.' )
+                              help = 'Increase verbosity level.' )
 cmd_line_parser.add_argument( '-t', '--threads', required = True, type = int,
                               help = 'Number of threads.' )
+cmd_line_parser.add_argument( '-q', '--quiet', required = False, action = 'store_true',
+                              help = 'Make ecm less verbose.' )
 cmd_line_parser.add_argument( '-maxmem', '--max_memory',
                               help = 'Maximum memory usage per thread.' )
 cmd_line_parser.add_argument( '-k', '--stage2_steps',
                               type = int, required = False,
                               help = 'Number of steps to perform in stage 2.' )
+cmd_line_parser.add_argument( '-n', '--nice', required = False, action = 'store_true',
+                              help = 'Run ecm in "nice" mode (below normal priority).' )
+cmd_line_parser.add_argument( '-nn', '--very_nice', required = False, action = 'store_true',
+                              help = 'Run ecm in "very nice" mode (idle priority).' )
 cmd_line_parser.add_argument( '-i', '--input_file', required = True,
                               help = 'Input file.' )
 cmd_line_parser.add_argument( '-o', '--output_path', required = True,
@@ -87,21 +92,28 @@ class EcmWorkUnit:
         self.output_file_path = args.output_path + \
                                     '-ecmx.{0:s}.out'.format(id)
         self.processed = False
+        self.thread_id = 0
 
 # ----------------------------------------------------------------------------
 # Worker thread: gets ECM work unit from the work queue and runs its processing
 # ----------------------------------------------------------------------------
 class EcmWorker:
-    def __init__(self, work_queue, work_finished_event, fully_factored_event):
+    
+    id_seq = 1
+
+    def __init__(self, work_queue, work_finished_event, fully_factored_event, id):
         self.work_queue = work_queue
         self.work_finished_event = work_finished_event
         self.fully_factored_event = fully_factored_event
         self.thread = threading.Thread( target = self.work, args=() )
+        self.id = id
+        self.id_seq = self.id_seq + 1
     
     def work(self):
         while(True):
             try:
                 work_unit = self.work_queue.get_nowait()
+                work_unit.thread_id = self.id
                 do_run_ecm(work_unit)
             except queue.Empty:
                 if(  self.work_finished_event.is_set() 
@@ -138,10 +150,13 @@ def do_run_ecm(work_unit):
     args = work_unit.args
     cmd = []
     cmd.append(args.ecm_path)
-    cmd.append('-timestamp')
-    if (args.verbosity >= 2):
+    if( not args.quiet ):
         cmd.append('-v')
-    cmd.append('-nn')
+        cmd.append('-timestamp')
+    if( args.nice ):
+        cmd.append('-n')
+    if( args.very_nice ):
+        cmd.append('-nn')
     cmd.append('-inp')
     cmd.append('{0:s}'.format(args.input_file))
     if (args.max_memory):
@@ -155,7 +170,7 @@ def do_run_ecm(work_unit):
     cmd.append('{0:s}'.format(work_unit.B1))
     output_file_path = work_unit.output_file_path
     with open(output_file_path, 'wb') as output_f:
-        logger.info('Running {0:d} curves at {1:s}...'.format(work_unit.curves, work_unit.B1))
+        logger.info('Running {0:d} curves at {1:s} (thread {2:d})...'.format(work_unit.curves, work_unit.B1, work_unit.thread_id))
         proc = subprocess.Popen(cmd, stdout = output_f, stderr = output_f)
         logger.debug('[pid: {0:d}] '.format(proc.pid) + string_array_to_string(cmd)
                          + ' > {0:s} 2>&1'.format(output_file_path))
@@ -165,10 +180,12 @@ def do_run_ecm(work_unit):
                 # Bit 3 is set when cofactor is PRP, return code is 8 when
                 # the input number itself is found as factor
                 if( (work_unit.return_code & 8) and (work_unit.return_code != 8) ):
+                    logger.info('A factor has been found, the cofactor is a PRP!')
                     logger.debug('Factor found by [pid:{0:d}], cofactor is PRP.'.format(proc.pid))
                     work_unit.fully_factored_event.set()
                     work_unit.factor_found = True
                 elif( work_unit.return_code & 2 ):
+                    logger.info('A factor has been found!')
                     logger.debug('Factor found by [pid:{0:d}].'.format(proc.pid))
                     work_unit.factor_found = True
                 break
@@ -186,10 +203,12 @@ def do_run_ecm(work_unit):
 # ----------------------------------------------------------------------------
 def create_workers(count, work_queue, work_finished_event, fully_factored_event):
     workers = []
+    id = 1
     for i in range(count):
-        worker = EcmWorker(work_queue, work_finished_event, fully_factored_event)
+        worker = EcmWorker(work_queue, work_finished_event, fully_factored_event, id)
         workers.append(worker)
         worker.start()
+        id = id + 1
     return workers
 
 # ----------------------------------------------------------------------------
@@ -202,8 +221,11 @@ def enqueue_work_units(args, work_queue, work_units, fully_factored_event):
         ct = int(curves / args.threads)
         rc = curves - args.threads * ct
         worker_c = 0
+        logger.info('Queueing ' + str(curves) + ' curves @ B1=' + b1_bound)
         while(worker_c < args.threads):
             curvz = ct + (1 if (worker_c < rc) else 0)
+            if( not curvz ):
+                break
             id = '{0:d}_{1:d}'.format(file_index, worker_c)
             if( fully_factored_event.is_set() ):
                 return
@@ -239,6 +261,7 @@ def run_ecm(args):
                     for line in worker_output_file:
                         output_file.write(line)
                 os.remove(work_unit.output_file_path)
+    logger.info('Done.')
 
 
 # ----------------------------------------------------------------------------
