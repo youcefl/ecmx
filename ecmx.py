@@ -41,7 +41,7 @@ import os
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-VERSION = '0.3.3'
+VERSION = '0.3.4'
 NAME = 'ecmx'
 print( NAME + ' version ' + VERSION )
 print( 'Copyright Youcef Lemsafer (May 2014 - Jan 2016).' )
@@ -103,6 +103,18 @@ class EcmWorkUnit:
                                     '-ecmx.{0:s}.out'.format(id)
         self.processed = False
         self.thread_id = 0
+        self.curves_done = 0
+        self.curves_doneLck = threading.Lock()
+
+    def incCurvesDone(self):
+        with self.curves_doneLck:
+            self.curves_done = self.curves_done + 1
+
+    def curvesDone(self):
+        curvesCount = 0
+        with self.curves_doneLck:
+            curvesCount = self.curves_done
+        return curvesCount
 
 
 # ----------------------------------------------------------------------------
@@ -155,12 +167,9 @@ def string_array_to_string(str_array):
 
 
 # ----------------------------------------------------------------------------
-# Process a work unit
+# Returns GMP-ECM command line for a given work unit
 # ----------------------------------------------------------------------------
-def do_run_ecm(work_unit):
-    # don't bother running a work unit if the number is fully factored
-    if( work_unit.fully_factored_event.is_set() ): 
-        return
+def build_gmp_ecm_cmd_line(work_unit):
     args = work_unit.args
     cmd = []
     cmd.append(args.ecm_path)
@@ -182,33 +191,82 @@ def do_run_ecm(work_unit):
     cmd.append('-c')
     cmd.append('{0:d}'.format(work_unit.curves))
     cmd.append('{0:s}'.format(work_unit.B1))
+
+    return cmd
+
+
+# ----------------------------------------------------------------------------
+# Process a work unit
+# ----------------------------------------------------------------------------
+def do_run_ecm(work_unit):
+    # don't bother running a work unit if the number is fully factored
+    if( work_unit.fully_factored_event.is_set() ): 
+        return
+    cmd = build_gmp_ecm_cmd_line(work_unit)
     output_file_path = work_unit.output_file_path
-    with open(output_file_path, 'wb') as output_f:
+    with open(output_file_path, 'ab') as output_f, open(output_file_path, 'r') as output_r:
+        # Reading has to ignore any previous file content
+        output_r.seek(0, os.SEEK_END)
         logger.info('Running {0:d} curves at {1:s} (thread {2:d})...'.format(work_unit.curves,
                         work_unit.B1, work_unit.thread_id))
         proc = subprocess.Popen(cmd, stdout = output_f, stderr = output_f)
         logger.debug('[pid: {0:d}] '.format(proc.pid) + string_array_to_string(cmd)
                          + ' > {0:s} 2>&1'.format(output_file_path))
+        haveToLeave = False
+        lastCurveOutput = ''
+        lastCurveOutputStart = ''
+        outputLastCurveIndic = -1
+        isPreviousLineTimestamp = False
         while(True):
             if( proc.poll() != None ):
                 work_unit.return_code = proc.returncode
                 # Bit 3 is set when cofactor is PRP, return code is 8 when
                 # the input number itself is found as factor
                 if( (work_unit.return_code & 8) and (work_unit.return_code != 8) ):
-                    logger.info('A factor has been found, the cofactor is a PRP!')
+                    logger.info('A factor has been found (thread {0:d}), the cofactor is PRP!'.format(work_unit.thread_id))
                     logger.debug('Factor found by [pid:{0:d}], cofactor is PRP.'.format(proc.pid))
                     work_unit.fully_factored_event.set()
                     work_unit.factor_found = True
                 elif( work_unit.return_code & 2 ):
-                    logger.info('A factor has been found!')
+                    logger.info('A factor has been found (thread {0:d})!'.format(work_unit.thread_id))
                     logger.debug('Factor found by [pid:{0:d}].'.format(proc.pid))
                     work_unit.factor_found = True
-                break
+                haveToLeave = True
             else:
                 if( work_unit.fully_factored_event.is_set() ):
                     proc.kill()
-                    break
-            time.sleep(1)
+                    haveToLeave = True
+            for line in output_r:
+                if(line.startswith('GMP-ECM ')):
+                    lastCurveOutputStart = line
+                    lastCurveOutput = ''
+                    continue
+                if(line.startswith(('Running on', 'Input number'))):
+                    lastCurveOutputStart = lastCurveOutputStart + line
+                    continue
+                if(line.startswith('[')):
+                    lastCurveOutput = line
+                    isPreviousLineTimestamp = True
+                    continue
+                if(line.startswith('Using B1=')):
+                    if(not isPreviousLineTimestamp):
+                        lastCurveOutput = ''
+                    isPreviousLineTimestamp = False
+                if(line.startswith('Step 2 took ')):
+                    work_unit.incCurvesDone()
+                if(line.startswith('********** Factor found')):
+                    outputLastCurveIndic = 0
+                lastCurveOutput = lastCurveOutput + line
+                if(outputLastCurveIndic >= 0):
+                    outputLastCurveIndic = outputLastCurveIndic + 1
+                if(outputLastCurveIndic == 3):
+                    logger.info('GMP-ECM output (thread {0:d}):\n\n'.format(work_unit.thread_id) 
+                                 + lastCurveOutputStart + lastCurveOutput)
+                    outputLastCurveIndic = -1
+            if(haveToLeave):
+                break
+            time.sleep(2)
+
         logger.debug('Work unit {0:s} processed.'.format(work_unit.id))
         work_unit.processed = True
 
@@ -277,7 +335,14 @@ def run_ecm(args):
                     for line in worker_output_file:
                         output_file.write(line)
                 os.remove(work_unit.output_file_path)
-    logger.info('Done.')
+
+    results = dict()
+    for wk in work_units:
+        results[wk.B1] = results[wk.B1] + wk.curvesDone() if (wk.B1 in results) else wk.curvesDone()
+    for b1, c in results.items():
+        logger.info('Ran {0:d} curves @ B1={1:s}'.format(c, b1))
+
+    logger.debug('The end.')
 
 
 # ----------------------------------------------------------------------------
