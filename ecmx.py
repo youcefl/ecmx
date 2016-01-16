@@ -25,6 +25,9 @@
 # ----------------------------------------------------------------------------
 # Creation date: 2014.05.22
 # Creator: Youcef Lemsafer
+# What it is: a wrapper over GMP-ECM which allows running multiple instances
+# of it in parallel. The number of instances to run in parallel is specified
+# via command line option -t (--threads).
 # ----------------------------------------------------------------------------
 
 import argparse
@@ -35,17 +38,22 @@ import time
 import queue
 import os
 
+
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-VERSION = '0.3.2'
+VERSION = '0.3.3'
 NAME = 'ecmx'
+print( NAME + ' version ' + VERSION )
+print( 'Copyright Youcef Lemsafer (May 2014 - Jan 2016).' )
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
 logger = logging.getLogger(NAME)
 logger.setLevel(logging.DEBUG)
 
+
 # ----------------------------------------------------------------------------
+# Command line definition
 # ----------------------------------------------------------------------------
 cmd_line_parser = argparse.ArgumentParser()
 cmd_line_parser.add_argument( '-v', '--verbosity', action = 'count',
@@ -71,10 +79,12 @@ cmd_line_parser.add_argument( '-o', '--output_path', required = True,
 cmd_line_parser.add_argument( '-e', '--ecm_path', default = 'ecm',
                               help = 'Path of ecm executable.' )
 cmd_line_parser.add_argument( '-cs', '--curves_spec', required = True,
-                              nargs = 2, help = 'Curves specification as <number of curves> <B1>.',
+                              nargs = 2, help = 'Curves specification as <number of curves> <B1> ('
+                              + 'the option can be specified multiple times e.g. -cs 960 1e6 -cs 2400 3e6).',
                               action = 'append',
                               metavar = ('NUMBER_OF_CURVES', 'B1') )
 arguments = cmd_line_parser.parse_args()
+
 
 # ----------------------------------------------------------------------------
 # Class holding an ECM work unit i.e. parameters used for running a certain
@@ -93,6 +103,7 @@ class EcmWorkUnit:
                                     '-ecmx.{0:s}.out'.format(id)
         self.processed = False
         self.thread_id = 0
+
 
 # ----------------------------------------------------------------------------
 # Worker thread: gets ECM work unit from the work queue and runs its processing
@@ -129,6 +140,8 @@ class EcmWorker:
         self.thread.join()
 
 
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 def string_array_to_string(str_array):
     str = ''
     is_first = True
@@ -139,6 +152,7 @@ def string_array_to_string(str_array):
         if( not sep ):
             sep = ' '
     return str
+
 
 # ----------------------------------------------------------------------------
 # Process a work unit
@@ -170,7 +184,8 @@ def do_run_ecm(work_unit):
     cmd.append('{0:s}'.format(work_unit.B1))
     output_file_path = work_unit.output_file_path
     with open(output_file_path, 'wb') as output_f:
-        logger.info('Running {0:d} curves at {1:s} (thread {2:d})...'.format(work_unit.curves, work_unit.B1, work_unit.thread_id))
+        logger.info('Running {0:d} curves at {1:s} (thread {2:d})...'.format(work_unit.curves,
+                        work_unit.B1, work_unit.thread_id))
         proc = subprocess.Popen(cmd, stdout = output_f, stderr = output_f)
         logger.debug('[pid: {0:d}] '.format(proc.pid) + string_array_to_string(cmd)
                          + ' > {0:s} 2>&1'.format(output_file_path))
@@ -210,6 +225,7 @@ def create_workers(count, work_queue, work_finished_event, fully_factored_event)
         worker.start()
         id = id + 1
     return workers
+
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
@@ -266,11 +282,10 @@ def run_ecm(args):
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-
-# Set up logging
+# Logging set up
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG if (arguments.verbosity >= 1) else logging.INFO)
-console_handler.setFormatter(logging.Formatter('|-> %(message)s'))
+console_handler.setFormatter(logging.Formatter('| %(asctime)s | %(message)s'))
 logger.addHandler(console_handler)
 
 logger.info('')
