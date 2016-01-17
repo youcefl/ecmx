@@ -42,7 +42,7 @@ from datetime import datetime
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-VERSION = '0.4.0'
+VERSION = '0.4.1'
 NAME = 'ecmx'
 print( NAME + ' version ' + VERSION )
 print( 'Copyright Youcef Lemsafer (May 2014 - Jan 2016).' )
@@ -63,8 +63,8 @@ cmd_line_parser.add_argument( '-v', '--verbosity', action = 'count',
 cmd_line_parser.add_argument( '-t', '--threads', required = True, type = int,
                               help = 'Number of threads.' )
 cmd_line_parser.add_argument( '-d', '--delta_progress', required = False, type = int,
-                              default = 10,
-                              help = 'The number of minutes between progress outputs.')
+                              default = 600, # ten minutes
+                              help = 'The number of seconds between progress outputs.')
 cmd_line_parser.add_argument( '-q', '--quiet', required = False, action = 'store_true',
                               help = 'Make GMP-ECM less verbose.' )
 cmd_line_parser.add_argument( '-maxmem', '--max_memory',
@@ -105,10 +105,12 @@ def string_array_to_string(str_array):
 
 
 # ----------------------------------------------------------------------------
-# Class holding an ECM work unit i.e. parameters used for running a certain
-# number of curves at given B1 bound.
 # ----------------------------------------------------------------------------
 class EcmWorkUnit:
+    """Holds parameters defining a work unit (number of curves, B1, etc.)"""
+
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def __init__(self, args, curves, B1, id, fully_factored_event):
         self.args = args # command line arguments
         self.curves = curves # number of curves to run
@@ -121,64 +123,89 @@ class EcmWorkUnit:
                                     '-ecmx.{0:s}.out'.format(id)
         self.processed = False
         self.thread_id = 0
-        self.curves_done = 0
-        self.curves_doneLck = threading.Lock()
+        # Note: my_curves_done doesn't have to be protected from
+        # concurrent access because work units are not shared
+        # between workers and the number of curves done from
+        # each work unit is only ever read at the end when
+        # the workers are done.
+        self.my_curves_done = 0
 
-    def incCurvesDone(self):
-        with self.curves_doneLck:
-            self.curves_done = self.curves_done + 1
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
+    def inc_curves_done(self):
+        """Increments the number of curves done by one."""
 
-    def curvesDone(self):
-        curvesCount = 0
-        with self.curves_doneLck:
-            curvesCount = self.curves_done
-        return curvesCount
+        self.my_curves_done = self.my_curves_done + 1
+
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
+    def curves_done(self):
+        """Returns the number of curves performed"""
+
+        return self.my_curves_done
 
 
 # ----------------------------------------------------------------------------
-# Worker thread: gets ECM work unit from the work queue and runs its processing
 # ----------------------------------------------------------------------------
 class EcmWorker:
-    
-    id_seq = 1
+    """Class defining worker threads
 
-    def __init__(self, work_queue, work_finished_event, fully_factored_event, id, timer):
+    Once method start is called on an instance of this class
+    it keeps consuming work units from the work queue and running
+    their processing until there is no more work or the number
+    is fully factored.
+    """
+
+    id_seq = 1 # sequence for thread ids
+
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
+    def __init__(self, work_queue, no_more_work_event, fully_factored_event, id, timer):
         self.work_queue = work_queue
-        self.work_finished_event = work_finished_event
+        self.no_more_work_event = no_more_work_event
         self.fully_factored_event = fully_factored_event
         self.thread = threading.Thread( target = self.work, args=() )
         self.id = id
         self.id_seq = self.id_seq + 1
         self.timer = timer
         self.lastCurveOutput = ''
-        self.lastCurveOutputStart = ''
+        self.lastCurveOutputPrefix = ''
         self.outputLastCurveIndic = -1
         self.gmpEcmOutputHasTimestamp = False
 
     
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def work(self):
+        """Loops getting work units from the queue and running their processing"""
+
         while(True):
             try:
                 work_unit = self.work_queue.get_nowait()
                 work_unit.thread_id = self.id
                 self.do_run_ecm(work_unit)
             except queue.Empty:
-                if(  self.work_finished_event.is_set() 
+                if(  self.no_more_work_event.is_set() 
                   or self.fully_factored_event.is_set() ):
                     break
                 time.sleep(1)
                 continue
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def start(self):
         self.thread.start()
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def join(self):
         self.thread.join()
 
     # ----------------------------------------------------------------------------
-    # Returns GMP-ECM command line for a given work unit
     # ----------------------------------------------------------------------------
     def build_gmp_ecm_cmd_line(self, work_unit):
+        """Returns GMP-ECM command line for a given work unit"""
+
         args = work_unit.args
         cmd = []
         cmd.append(args.ecm_path)
@@ -205,9 +232,10 @@ class EcmWorker:
 
 
     # ----------------------------------------------------------------------------
-    # Process a work unit
     # ----------------------------------------------------------------------------
     def do_run_ecm(self, work_unit):
+        """Processes a work unit"""
+
         # don't bother running a work unit if the number is fully factored
         if( work_unit.fully_factored_event.is_set() ): 
             return
@@ -231,12 +259,12 @@ class EcmWorker:
                     # Bit 3 is set when cofactor is PRP, return code is 8 when
                     # the input number itself is found as factor
                     if( (work_unit.return_code & 8) and (work_unit.return_code != 8) ):
-                        logger.info('A factor has been found (thread {0:d}), the cofactor is PRP!'.format(work_unit.thread_id))
+                        logger.info('A factor has been found (thread {0:d}), the cofactor is PRP!'.format(self.id))
                         logger.debug('Factor found by [pid:{0:d}], cofactor is PRP.'.format(proc.pid))
                         work_unit.fully_factored_event.set()
                         work_unit.factor_found = True
                     elif( work_unit.return_code & 2 ):
-                        logger.info('A factor has been found (thread {0:d})!'.format(work_unit.thread_id))
+                        logger.info('A factor has been found (thread {0:d})!'.format(self.id))
                         logger.debug('Factor found by [pid:{0:d}].'.format(proc.pid))
                         work_unit.factor_found = True
                     haveToLeave = True
@@ -253,21 +281,47 @@ class EcmWorker:
             work_unit.processed = True
 
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def clear_parsing_data(self):
+        """Resets GMP-ECM output parsing data"""
+
         self.lastCurveOutput = ''
-        self.lastCurveOutputStart = ''
+        self.lastCurveOutputPrefix = ''
         self.outputLastCurveIndic = -1
         self.gmpEcmOutputHasTimestamp = False
 
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def parse_gmp_ecm_output(self, work_unit, output_r):
+        """"Parses" GMP-ECM's output to extract needed information
+
+        Lines of interest are the following ones:
+          - 'GMP-ECM <version number> ...' => first line printed by GMP-ECM, has
+            to be added to the prefix
+          - '[Sat Jan 16 ...]' => timestamp indicating that a new curve is being done
+          - 'Using B1=...' => in case the timestamp is not present this indicates start
+            of a new curve
+          - 'Input number is <number>' => has to be added to the prefix   
+          - 'Running on <machine name>' => has to be added to the prefix
+          - 'Step 2 took ' => indicates curve done (won't be there if a factor is found
+            in step 1)
+          - '********** Factor found in step 1' => indicates curve done
+        When a factor is found we have to print GMP-ECM's output regarding last curve
+        and when doing so don't forget the last two lines:
+          ********** Factor found in step ....
+          Found ....                                               # this one...
+          <Composite|Probable prime> cofactor ... has x digits     # and this one
+        """
+
         for line in output_r:
             if(line.startswith('GMP-ECM ')):
-                self.lastCurveOutputStart = line
+                self.lastCurveOutputPrefix = line
                 self.lastCurveOutput = ''
                 continue
             if(line.startswith(('Running on', 'Input number'))):
-                self.lastCurveOutputStart = self.lastCurveOutputStart + line
+                self.lastCurveOutputPrefix = self.lastCurveOutputPrefix + line
                 continue
             if(line.startswith('[')):
                 self.lastCurveOutput = line
@@ -278,26 +332,27 @@ class EcmWorker:
                     self.lastCurveOutput = ''
                 self.gmpEcmOutputHasTimestamp = False
             if(line.startswith(('Step 2 took ', '********** Factor found in step 1'))):
-                work_unit.incCurvesDone()
+                self.timer.curve_done(work_unit.B1)
+                work_unit.inc_curves_done()
             if(line.startswith('********** Factor found')):
                 self.outputLastCurveIndic = 0
             self.lastCurveOutput = self.lastCurveOutput + line
             if(self.outputLastCurveIndic >= 0):
                 self.outputLastCurveIndic = self.outputLastCurveIndic + 1
             if(self.outputLastCurveIndic == 3):
-                logger.info('GMP-ECM output (thread {0:d}):\n\n'.format(work_unit.thread_id) 
-                             + self.lastCurveOutputStart + self.lastCurveOutput)
+                logger.info('GMP-ECM output (thread {0:d}):\n\n'.format(self.id) 
+                             + self.lastCurveOutputPrefix + self.lastCurveOutput)
                 self.outputLastCurveIndic = -1
 
+
 # ----------------------------------------------------------------------------
-# Timer class, outputs progress, elapsed time, average curve duration, etc.
-# @todo: I think this class (and its interaction with the workers via the work
-# units) can be (greatly?) simplified.
 # ----------------------------------------------------------------------------
 class Timer:
-    
-    def __init__(self, work_units, minutes_between_output):
-        self.work_units = work_units
+    """Timer class, outputs progress, elapsed time, average curve duration, etc."""
+
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
+    def __init__(self, work_units, seconds_between_output):
         self.time_table = dict(dict())
         self.time_table_lck = threading.Lock()
         for wk in work_units:
@@ -308,20 +363,16 @@ class Timer:
                 'Done' : False}
         self.thread = threading.Thread(target = self.work, args=())
         self.end_event = threading.Event()
-        self.seconds_between_output = minutes_between_output * 60
+        self.seconds_between_output = seconds_between_output
 
+
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def work(self):
         logger.debug('Starting timer...')
         lastOuputTime = datetime.now()
         while(True):
             with self.time_table_lck:
-                for work_unit in self.work_units:
-                    tableEntry = self.time_table[work_unit.B1]
-                    tableEntry['curvesDone'] = 0
-                for work_unit in self.work_units:
-                    tableEntry = self.time_table[work_unit.B1]
-                    tableEntry['curvesDone'] = tableEntry['curvesDone'] + work_unit.curvesDone()
-                    logger.debug('work_unit.curvesDone() = ' + str(work_unit.curvesDone()))
                 for B1, B1Info in self.time_table.items():
                     if(B1Info['Done']):
                         continue
@@ -343,19 +394,38 @@ class Timer:
             while((datetime.now() - lastOuputTime).total_seconds() < self.seconds_between_output):
                 if( self.end_event.is_set() ):
                     return
-                time.sleep(5)
+                time.sleep(2)
 
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
+    def curve_done(self, B1):
+        """Informs the timer that a curve has been completed at the given B1"""
+
+        with self.time_table_lck:
+            tableEntry = self.time_table[B1]
+            assert tableEntry['isStarted']
+            tableEntry['curvesDone'] = tableEntry['curvesDone'] + 1
+
+
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def on_work_unit_started(self, work_unit):
+        """Informs the timer that the processing of a work unit has started"""
+
         with self.time_table_lck:
             tableEntry = self.time_table[work_unit.B1]
             if(not tableEntry['isStarted']):
                 tableEntry['isStarted'] = True
                 tableEntry['startTime'] = datetime.now()
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def start(self):
         self.thread.start()
 
+    # ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
     def end(self):
         self.end_event.set()
 
@@ -363,11 +433,11 @@ class Timer:
 # ----------------------------------------------------------------------------
 # Create <count> worker threads
 # ----------------------------------------------------------------------------
-def create_workers(count, work_queue, work_finished_event, fully_factored_event, timer):
+def create_workers(count, work_queue, no_more_work_event, fully_factored_event, timer):
     workers = []
     id = 1
     for i in range(count):
-        worker = EcmWorker(work_queue, work_finished_event, fully_factored_event, id, timer)
+        worker = EcmWorker(work_queue, no_more_work_event, fully_factored_event, id, timer)
         workers.append(worker)
         worker.start()
         id = id + 1
@@ -408,17 +478,17 @@ def enqueue_work_units(work_queue, work_units, fully_factored_event):
 # ----------------------------------------------------------------------------
 def run_ecm(args):
     work_queue = queue.Queue(args.threads)
-    work_finished_event = threading.Event()
+    no_more_work_event = threading.Event()
     work_units = []
     with open(args.output_path, 'ab') as output_file:
         fully_factored_event = threading.Event()
         create_work_units(args, work_units, fully_factored_event)
         timer = Timer(work_units, args.delta_progress)
-        workers = create_workers(args.threads, work_queue, work_finished_event, fully_factored_event, timer)
+        workers = create_workers(args.threads, work_queue, no_more_work_event, fully_factored_event, timer)
         timer.start()
         # Enqueue the created work units
         enqueue_work_units(work_queue, work_units, fully_factored_event)
-        work_finished_event.set()
+        no_more_work_event.set()
         for worker in workers:
             worker.join()
         timer.end()
@@ -433,7 +503,7 @@ def run_ecm(args):
 
     results = dict()
     for wk in work_units:
-        results[wk.B1] = results[wk.B1] + wk.curvesDone() if (wk.B1 in results) else wk.curvesDone()
+        results[wk.B1] = results[wk.B1] + wk.curves_done() if (wk.B1 in results) else wk.curves_done()
     for b1, c in results.items():
         logger.info('Ran {0:d} curves @ B1={1:s}'.format(c, b1))
 
