@@ -1,8 +1,7 @@
 # ecmx
 A Python wrapper over GMP-ECM
 
-ecmx is a simple, easily deployed wrapper over GMP-ECM which consists of a single
-Python file.
+ecmx is a simple, easily deployed wrapper over GMP-ECM which consists of a single Python file.
 
 Getting started
 ===============
@@ -13,7 +12,8 @@ containing the number you want to factor e.g.
 
         > echo "(10^353-1)/(9*1781225293*1044667255801249)" > 10m353.n
 
-Now, to run 128 curves at B1=26e7 you would enter
+Now, to run 128 curves at B1=26e7 using 16 threads with progress output every two
+hours, you would enter
 
         > ecmx.py -t 16 -d 7200 -i 10m353.n -o 10m353_26e7.out -cs 128 26e7
 
