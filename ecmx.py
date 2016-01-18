@@ -38,11 +38,12 @@ import time
 import queue
 import os
 from datetime import datetime
+import re
 
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-VERSION = '0.4.1'
+VERSION = '0.4.2'
 NAME = 'ecmx'
 print( NAME + ' version ' + VERSION )
 print( 'Copyright Youcef Lemsafer (May 2014 - Jan 2016).' )
@@ -168,10 +169,13 @@ class EcmWorker:
         self.id = id
         self.id_seq = self.id_seq + 1
         self.timer = timer
+        self.lastCurveDuration = 0
+        # GMP-ECM output parsing stuff
         self.lastCurveOutput = ''
         self.lastCurveOutputPrefix = ''
         self.outputLastCurveIndic = -1
         self.gmpEcmOutputHasTimestamp = False
+        self.stepDurationPattern = re.compile('Step (?:1|2) took (\d+)ms')
 
     
     # ----------------------------------------------------------------------------
@@ -305,8 +309,9 @@ class EcmWorker:
             of a new curve
           - 'Input number is <number>' => has to be added to the prefix   
           - 'Running on <machine name>' => has to be added to the prefix
+          - 'Step 1 took' => we want the duration in milliseconds just after that
           - 'Step 2 took ' => indicates curve done (won't be there if a factor is found
-            in step 1)
+            in step 1) + same as step 1.
           - '********** Factor found in step 1' => indicates curve done
         When a factor is found we have to print GMP-ECM's output regarding last curve
         and when doing so don't forget the last two lines:
@@ -331,8 +336,13 @@ class EcmWorker:
                 if(not self.gmpEcmOutputHasTimestamp):
                     self.lastCurveOutput = ''
                 self.gmpEcmOutputHasTimestamp = False
+                self.lastCurveDuration = 0
+            if(line.startswith(('Step 1 took ', 'Step 2 took '))):
+                match = self.stepDurationPattern.match(line)
+                if(match):
+                    self.lastCurveDuration = self.lastCurveDuration + int(match.group(1)) / 1000
             if(line.startswith(('Step 2 took ', '********** Factor found in step 1'))):
-                self.timer.curve_done(work_unit.B1)
+                self.timer.curve_done(work_unit.B1, self.lastCurveDuration)
                 work_unit.inc_curves_done()
             if(line.startswith('********** Factor found')):
                 self.outputLastCurveIndic = 0
@@ -357,6 +367,7 @@ class Timer:
         self.time_table_lck = threading.Lock()
         for wk in work_units:
             self.time_table[wk.B1] =  { 'curvesDone' : 0,
+                'avgCurveDurationInSeconds' : 0.0,
                 'curves' : (self.time_table[wk.B1]['curves'] + wk.curves) if (wk.B1 in self.time_table) else wk.curves,
                 'isStarted' : False,
                 'startTime' : datetime.min,
@@ -385,9 +396,11 @@ class Timer:
                     curves = B1Info['curves']
                     logger.debug('Curves done = ' + str(curvesDone) + ', curves= ' + str(curves))
                     if(curvesDone):
-                        logger.info('{0:d} curves completed @ B1={1:s} out of {2:d} (Elapsed time: {3:s}, avg curve duration: {4:s}s, ETA: {5:s}s).'
+                        logger.info(('{0:d} curve(s) completed @ B1={1:s} out of {2:d} (Elapsed time: {3:s},' +
+                                    ' avg curve duration: {4:.2f}s, ETA: {5:s}).')
                                          .format(B1Info['curvesDone'], B1, B1Info['curves'], str(deltaT),
-                                            str(deltaT/curvesDone), str((curves / curvesDone - 1) * deltaT)))
+                                            B1Info['avgCurveDurationInSeconds'],
+                                            str((curves / curvesDone - 1) * deltaT)))
                         lastOuputTime = datetime.now()
                     if(curvesDone == curves):
                         B1Info['Done'] = True
@@ -399,13 +412,16 @@ class Timer:
 
     # ----------------------------------------------------------------------------
     # ----------------------------------------------------------------------------
-    def curve_done(self, B1):
+    def curve_done(self, B1, curveDurationSeconds):
         """Informs the timer that a curve has been completed at the given B1"""
 
         with self.time_table_lck:
             tableEntry = self.time_table[B1]
             assert tableEntry['isStarted']
+            curvesDoneBefore = tableEntry['curvesDone']
             tableEntry['curvesDone'] = tableEntry['curvesDone'] + 1
+            tableEntry['avgCurveDurationInSeconds'] = (curvesDoneBefore * tableEntry['avgCurveDurationInSeconds'] 
+                                                           + curveDurationSeconds) / (curvesDoneBefore + 1)
 
 
     # ----------------------------------------------------------------------------
