@@ -43,10 +43,10 @@ import re
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
-VERSION = '0.4.2'
+VERSION = '0.4.3'
 NAME = 'ecmx'
 print( NAME + ' version ' + VERSION )
-print( 'Copyright Youcef Lemsafer (May 2014 - Jan 2016).' )
+print( 'Copyright Youcef Lemsafer (May 2014 - Dec 2016).' )
 
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
@@ -77,6 +77,8 @@ cmd_line_parser.add_argument( '-n', '--nice', required = False, action = 'store_
                               help = 'Run ecm in "nice" mode (below normal priority).' )
 cmd_line_parser.add_argument( '-nn', '--very_nice', required = False, action = 'store_true',
                               help = 'Run ecm in "very nice" mode (idle priority).' )
+cmd_line_parser.add_argument( '-param', '--parametrization', required = False, type = int,
+                              help = 'Which parametrization should be used (option is sent as is to GMP-ECM).' )
 cmd_line_parser.add_argument( '-i', '--input_file', required = True,
                               help = 'Input file.' )
 cmd_line_parser.add_argument( '-o', '--output_path', required = True,
@@ -220,6 +222,9 @@ class EcmWorker:
             cmd.append('-n')
         if( args.very_nice ):
             cmd.append('-nn')
+        if( not args.parametrization is None ):
+            cmd.append('-param')
+            cmd.append('{0:d}'.format(args.parametrization))
         cmd.append('-inp')
         cmd.append('{0:s}'.format(args.input_file))
         if (args.max_memory):
